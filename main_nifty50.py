@@ -2,71 +2,113 @@ import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
-import time
+import requests
+import io
 
-# --- 1. DYNAMIC STOCK LIST FETCHING ---
+# --- APP CONFIGURATION ---
+st.set_page_config(page_title="Intraday Sniper", layout="wide")
+st.title("⚡ Intraday Sniper: Auto-Scanner")
+
+# 1. ROBUST TICKER FETCHING (Fixed)
 @st.cache_data
-def get_liquid_universe():
-    # Automatically get Nifty 50 tickers (Indian Market)
-    # For US Market, you can use: tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol'].tolist()
-    nifty50_url = "https://raw.githubusercontent.com/anirban-m/indian-stock-market-data/master/nifty50_list.csv"
+def get_nifty50_tickers():
+    # Official NSE CSV URL
+    url = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
+    
+    # Custom headers to prevent blocking
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
     try:
-        df = pd.read_csv(nifty50_url)
-        return [f"{s}.NS" for s in df['Symbol'].tolist()]
-    except:
-        return ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code == 200:
+            df = pd.read_csv(io.StringIO(response.text))
+            # Convert to Yahoo Finance format
+            return [f"{s.strip()}.NS" for s in df['Symbol'].tolist()]
+        else:
+            raise Exception("URL blocked")
+    except Exception as e:
+        st.sidebar.warning("Live list unreachable. Using stable fallback list.")
+        # Fallback: Top 20 most liquid Nifty 50 stocks
+        return [
+            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", 
+            "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS", "BAJFINANCE.NS",
+            "AXISBANK.NS", "ADANIENT.NS", "SUNPHARMA.NS", "TITAN.NS", "TATAMOTORS.NS",
+            "NTPC.NS", "M&M.NS", "POWERGRID.NS", "ASIANPAINT.NS", "HCLTECH.NS"
+        ]
 
-# --- 2. LIVE SCANNER ENGINE ---
-def analyze_market(tickers):
-    opportunities = []
-    progress_text = st.empty()
-    
-    for i, symbol in enumerate(tickers):
-        progress_text.text(f"Scanning {i+1}/{len(tickers)}: {symbol}")
-        try:
-            # Fetch 1-minute interval data for the current day
-            df = yf.download(symbol, period="1d", interval="1m", progress=False)
-            if df.empty or len(df) < 20: continue
+# 2. ANALYSIS ENGINE
+def analyze_stock(symbol):
+    try:
+        # Pull 1-minute data for the current day
+        df = yf.download(symbol, period="1d", interval="1m", progress=False)
+        if df.empty or len(df) < 20: return None
 
-            # Technical Analysis
-            df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
-            df['RSI'] = ta.rsi(df['Close'], length=14)
+        # INDICATORS
+        # VWAP requires High, Low, Close, and Volume
+        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+
+        last = df.iloc[-1]
+        price = round(last['Close'], 2)
+        vwap = round(last['VWAP'], 2)
+        rsi = round(last['RSI'], 1)
+        atr = last['ATR']
+
+        # CRITERIA: Buy if Price > VWAP and RSI > 60
+        if price > vwap and rsi > 60:
+            # Stop Loss at 1.5x ATR below entry
+            sl = round(price - (1.5 * atr), 2)
+            # Target for 1:2 Risk-Reward
+            target = round(price + (2 * (price - sl)), 2)
             
-            # Liquidity Filter: Avg Volume of last 10 minutes
-            avg_vol = df['Volume'].tail(10).mean()
-            last_price = df['Close'].iloc[-1]
-            last_vwap = df['VWAP'].iloc[-1]
-            last_rsi = df['RSI'].iloc[-1]
+            return {
+                "Ticker": symbol, "Price": price, "Signal": "🚀 BUY",
+                "Stop Loss": sl, "Target": target, "RSI": rsi, "Volume": int(last['Volume'])
+            }
+        return None
+    except:
+        return None
 
-            # Strategy: Price > VWAP (Bullish) and RSI > 60 (Momentum)
-            if last_price > last_vwap and last_rsi > 60:
-                opportunities.append({
-                    "Ticker": symbol,
-                    "Price": round(last_price, 2),
-                    "Signal": "🚀 BUY",
-                    "RSI": round(last_rsi, 1),
-                    "Vol (1m)": int(df['Volume'].iloc[-1])
-                })
-        except Exception:
-            continue
-    return pd.DataFrame(opportunities)
+# 3. UI CONTROLS
+st.sidebar.header("Trading Budget")
+user_budget = st.sidebar.number_input("Total Capital (₹)", value=100000)
+risk_pct = st.sidebar.slider("Risk Per Trade (%)", 0.5, 2.0, 1.0) / 100
 
-# --- 3. STREAMLIT UI ---
-st.set_page_config(page_title="Auto-Intraday", layout="wide")
-st.title("⚡ Auto-Liquid Stock Sniper")
-
-if st.button("Start Real-Time Auto-Scan"):
-    universe = get_liquid_universe()
-    st.info(f"Scanning {len(universe)} high-liquidity stocks...")
+if st.button("🔍 START LIVE SCAN"):
+    tickers = get_nifty50_tickers()
+    st.write(f"Scanning {len(tickers)} Stocks...")
     
-    results = analyze_market(universe)
+    found_any = False
+    progress_bar = st.progress(0)
     
-    if not results.empty:
-        st.success("Found High-Probability Setups!")
-        # Highlighting the Best Pick based on highest Volume
-        best_pick = results.sort_values(by="Vol (1m)", ascending=False).iloc[0]
+    results = []
+    for i, t in enumerate(tickers):
+        res = analyze_stock(t)
+        if res:
+            # Position Sizing
+            risk_amt = user_budget * risk_pct
+            qty = int(risk_amt // (res['Price'] - res['Stop Loss'])) if (res['Price'] - res['Stop Loss']) > 0 else 0
+            res['Quantity'] = qty
+            results.append(res)
+            found_any = True
+        progress_bar.progress((i + 1) / len(tickers))
+    
+    if found_any:
+        df_final = pd.DataFrame(results)
+        st.success("High Probability Setups Found!")
         
-        st.metric(label="🏆 TOP PICK", value=best_pick['Ticker'], delta=f"Price: {best_pick['Price']}")
-        st.dataframe(results, use_container_width=True)
+        # Display as cards
+        for item in results:
+            with st.expander(f"🎯 {item['Ticker']} - {item['Signal']}"):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Entry", f"₹{item['Price']}")
+                c2.metric("Target", f"₹{item['Target']}")
+                c3.metric("Stop Loss", f"₹{item['Stop Loss']}")
+                c4.metric("Buy Qty", item['Quantity'])
+        
+        st.table(df_final[['Ticker', 'Price', 'Signal', 'RSI', 'Quantity']])
     else:
-        st.warning("No clear momentum detected. Try again in 5 minutes.")
+        st.warning("No stocks currently match the VWAP + RSI criteria.")
