@@ -2,71 +2,104 @@ import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
-import time
+import datetime
 
-# --- 1. DYNAMIC STOCK LIST FETCHING ---
+# --- SETTINGS & UI ---
+st.set_page_config(page_title="Intraday Sniper", layout="wide")
+st.title("⚡ Intraday Sniper: Auto-Scanner")
+st.markdown("Scanning for **Momentum**, **VWAP Breakouts**, and **Risk-Adjusted Exits**.")
+
+# 1. STABLE TICKER FETCHING
 @st.cache_data
-def get_liquid_universe():
-    # Automatically get Nifty 50 tickers (Indian Market)
-    # For US Market, you can use: tickers = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')[0]['Symbol'].tolist()
-    nifty50_url = "https://raw.githubusercontent.com/anirban-m/indian-stock-market-data/master/nifty50_list.csv"
+def get_nifty50_tickers():
     try:
-        df = pd.read_csv(nifty50_url)
+        # Reliable URL for Nifty 50 list
+        url = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
+        df = pd.read_csv(url)
         return [f"{s}.NS" for s in df['Symbol'].tolist()]
     except:
-        return ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ICICIBANK.NS"]
+        # Fallback if NSE website is blocking requests
+        return ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "INFY.NS", "ICICIBANK.NS", 
+                "TATAMOTORS.NS", "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS"]
 
-# --- 2. LIVE SCANNER ENGINE ---
-def analyze_market(tickers):
-    opportunities = []
-    progress_text = st.empty()
-    
-    for i, symbol in enumerate(tickers):
-        progress_text.text(f"Scanning {i+1}/{len(tickers)}: {symbol}")
-        try:
-            # Fetch 1-minute interval data for the current day
-            df = yf.download(symbol, period="1d", interval="1m", progress=False)
-            if df.empty or len(df) < 20: continue
+# 2. ANALYSIS ENGINE
+def analyze_stock(symbol):
+    try:
+        # Download 1-minute data for the current session
+        df = yf.download(symbol, period="1d", interval="1m", progress=False)
+        if df.empty or len(df) < 20: return None
 
-            # Technical Analysis
-            df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
-            df['RSI'] = ta.rsi(df['Close'], length=14)
+        # Technical Indicators
+        df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
+        df['RSI'] = ta.rsi(df['Close'], length=14)
+        df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
+
+        last = df.iloc[-1]
+        price = round(last['Close'], 2)
+        vwap = round(last['VWAP'], 2)
+        rsi = round(last['RSI'], 1)
+        atr = last['ATR']
+
+        # CRITERIA: Price above VWAP and RSI > 60
+        if price > vwap and rsi > 60:
+            # Risk Management: 1.5x ATR Stop Loss
+            sl = round(price - (1.5 * atr), 2)
+            risk = price - sl
+            target = round(price + (2 * risk), 2) # 1:2 Reward/Risk
             
-            # Liquidity Filter: Avg Volume of last 10 minutes
-            avg_vol = df['Volume'].tail(10).mean()
-            last_price = df['Close'].iloc[-1]
-            last_vwap = df['VWAP'].iloc[-1]
-            last_rsi = df['RSI'].iloc[-1]
+            return {
+                "Ticker": symbol,
+                "Price": price,
+                "VWAP": vwap,
+                "RSI": rsi,
+                "Signal": "🚀 BULLISH",
+                "Stop Loss": sl,
+                "Target": target
+            }
+        return None
+    except:
+        return None
 
-            # Strategy: Price > VWAP (Bullish) and RSI > 60 (Momentum)
-            if last_price > last_vwap and last_rsi > 60:
-                opportunities.append({
-                    "Ticker": symbol,
-                    "Price": round(last_price, 2),
-                    "Signal": "🚀 BUY",
-                    "RSI": round(last_rsi, 1),
-                    "Vol (1m)": int(df['Volume'].iloc[-1])
-                })
-        except Exception:
-            continue
-    return pd.DataFrame(opportunities)
+# 3. SIDEBAR CONTROLS
+st.sidebar.header("Scanner Settings")
+budget = st.sidebar.number_input("Trading Budget (₹)", value=50000)
+max_risk_per_trade = st.sidebar.slider("Risk Per Trade (%)", 0.5, 2.0, 1.0) / 100
 
-# --- 3. STREAMLIT UI ---
-st.set_page_config(page_title="Auto-Intraday", layout="wide")
-st.title("⚡ Auto-Liquid Stock Sniper")
-
-if st.button("Start Real-Time Auto-Scan"):
-    universe = get_liquid_universe()
-    st.info(f"Scanning {len(universe)} high-liquidity stocks...")
+# 4. EXECUTION
+if st.button("🔍 START SCAN"):
+    tickers = get_nifty50_tickers()
+    st.info(f"Scanning {len(tickers)} liquid stocks...")
     
-    results = analyze_market(universe)
+    results = []
+    progress_bar = st.progress(0)
     
-    if not results.empty:
-        st.success("Found High-Probability Setups!")
-        # Highlighting the Best Pick based on highest Volume
-        best_pick = results.sort_values(by="Vol (1m)", ascending=False).iloc[0]
+    for i, t in enumerate(tickers):
+        res = analyze_stock(t)
+        if res:
+            # Position Sizing: How many shares to buy?
+            risk_amt = budget * max_risk_per_trade
+            loss_per_share = res['Price'] - res['Stop Loss']
+            if loss_per_share > 0:
+                res['Qty'] = int(risk_amt // loss_per_share)
+            else:
+                res['Qty'] = 0
+            results.append(res)
+        progress_bar.progress((i + 1) / len(tickers))
+    
+    if results:
+        df_results = pd.DataFrame(results)
+        st.success(f"Found {len(results)} Opportunities!")
         
-        st.metric(label="🏆 TOP PICK", value=best_pick['Ticker'], delta=f"Price: {best_pick['Price']}")
-        st.dataframe(results, use_container_width=True)
+        # Display as nice Cards
+        for idx, row in df_results.iterrows():
+            with st.container():
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric(row['Ticker'], f"₹{row['Price']}")
+                col2.metric("Target", f"₹{row['Target']}", delta="Exit High")
+                col3.metric("Stop Loss", f"₹{row['Stop Loss']}", delta="-1.5x ATR", delta_color="inverse")
+                col4.metric("Quantity", row['Qty'], delta="Based on Risk")
+                st.divider()
+        
+        st.dataframe(df_results)
     else:
-        st.warning("No clear momentum detected. Try again in 5 minutes.")
+        st.warning("No high-momentum setups found. Try again in 10 minutes.")
