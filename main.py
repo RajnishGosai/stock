@@ -65,4 +65,50 @@ def analyze_stock(symbol):
             target = round(price + (2 * (price - sl)), 2)
             
             return {
-                "Ticker
+                "Ticker": symbol, "Price": price, "Signal": "🚀 BUY",
+                "Stop Loss": sl, "Target": target, "RSI": rsi, "Volume": int(last['Volume'])
+            }
+        return None
+    except:
+        return None
+
+# 3. UI CONTROLS
+st.sidebar.header("Trading Budget")
+user_budget = st.sidebar.number_input("Total Capital (₹)", value=100000)
+risk_pct = st.sidebar.slider("Risk Per Trade (%)", 0.5, 2.0, 1.0) / 100
+
+if st.button("🔍 START LIVE SCAN"):
+    tickers = get_nifty50_tickers()
+    st.write(f"Scanning {len(tickers)} Stocks...")
+    
+    found_any = False
+    progress_bar = st.progress(0)
+    
+    results = []
+    for i, t in enumerate(tickers):
+        res = analyze_stock(t)
+        if res:
+            # Position Sizing
+            risk_amt = user_budget * risk_pct
+            qty = int(risk_amt // (res['Price'] - res['Stop Loss'])) if (res['Price'] - res['Stop Loss']) > 0 else 0
+            res['Quantity'] = qty
+            results.append(res)
+            found_any = True
+        progress_bar.progress((i + 1) / len(tickers))
+    
+    if found_any:
+        df_final = pd.DataFrame(results)
+        st.success("High Probability Setups Found!")
+        
+        # Display as cards
+        for item in results:
+            with st.expander(f"🎯 {item['Ticker']} - {item['Signal']}"):
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Entry", f"₹{item['Price']}")
+                c2.metric("Target", f"₹{item['Target']}")
+                c3.metric("Stop Loss", f"₹{item['Stop Loss']}")
+                c4.metric("Buy Qty", item['Quantity'])
+        
+        st.table(df_final[['Ticker', 'Price', 'Signal', 'RSI', 'Quantity']])
+    else:
+        st.warning("No stocks currently match the VWAP + RSI criteria.")
