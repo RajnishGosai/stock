@@ -2,113 +2,75 @@ import streamlit as st
 import yfinance as yf
 import pandas_ta as ta
 import pandas as pd
-import requests
 import io
+import requests
 
-# --- APP CONFIGURATION ---
-st.set_page_config(page_title="Intraday Sniper", layout="wide")
-st.title("⚡ Intraday Sniper: Auto-Scanner")
+st.set_page_config(page_title="F&O Intraday Sniper", layout="wide")
+st.title("🏹 All F&O Stock Sniper")
 
-# 1. ROBUST TICKER FETCHING (Fixed)
+# 1. FETCH ALL F&O SYMBOLS (Dynamic)
 @st.cache_data
-def get_nifty50_tickers():
-    # Official NSE CSV URL
-    url = "https://www.niftyindices.com/IndexConstituent/ind_nifty50list.csv"
-    
-    # Custom headers to prevent blocking
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-    
+def get_all_fno_stocks():
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        if response.status_code == 200:
-            df = pd.read_csv(io.StringIO(response.text))
-            # Convert to Yahoo Finance format
-            return [f"{s.strip()}.NS" for s in df['Symbol'].tolist()]
-        else:
-            raise Exception("URL blocked")
+        # Using Zerodha's public instrument list as a reliable source for F&O
+        url = "https://api.kite.trade/instruments"
+        response = requests.get(url).text
+        df = pd.read_csv(io.StringIO(response))
+        
+        # Filter for NFO (National Futures & Options) segment and specifically Futures
+        # This gives us the underlying equity symbols for all F&O stocks
+        fno_df = df[df['exchange'] == 'NFO']
+        fno_list = fno_df['name'].unique().tolist()
+        
+        # Format for Yahoo Finance (.NS suffix)
+        # We filter out the indices like NIFTY/BANKNIFTY to focus on stocks
+        exclude = ['NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY']
+        final_list = [f"{s}.NS" for s in fno_list if s not in exclude and isinstance(s, str)]
+        
+        return sorted(final_list)
     except Exception as e:
-        st.sidebar.warning("Live list unreachable. Using stable fallback list.")
-        # Fallback: Top 20 most liquid Nifty 50 stocks
-        return [
-            "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", 
-            "SBIN.NS", "BHARTIARTL.NS", "ITC.NS", "LT.NS", "BAJFINANCE.NS",
-            "AXISBANK.NS", "ADANIENT.NS", "SUNPHARMA.NS", "TITAN.NS", "TATAMOTORS.NS",
-            "NTPC.NS", "M&M.NS", "POWERGRID.NS", "ASIANPAINT.NS", "HCLTECH.NS"
-        ]
+        st.error(f"Error fetching F&O list: {e}")
+        return ["RELIANCE.NS", "SBIN.NS", "TATASTEEL.NS"] # Minimal fallback
 
-# 2. ANALYSIS ENGINE
-def analyze_stock(symbol):
+# 2. THE SCANNER ENGINE
+def scan_logic(symbol):
     try:
-        # Pull 1-minute data for the current day
         df = yf.download(symbol, period="1d", interval="1m", progress=False)
         if df.empty or len(df) < 20: return None
-
-        # INDICATORS
-        # VWAP requires High, Low, Close, and Volume
+        
+        # Technical Logic
         df['VWAP'] = ta.vwap(df['High'], df['Low'], df['Close'], df['Volume'])
         df['RSI'] = ta.rsi(df['Close'], length=14)
         df['ATR'] = ta.atr(df['High'], df['Low'], df['Close'], length=14)
-
+        
         last = df.iloc[-1]
-        price = round(last['Close'], 2)
-        vwap = round(last['VWAP'], 2)
-        rsi = round(last['RSI'], 1)
-        atr = last['ATR']
-
-        # CRITERIA: Buy if Price > VWAP and RSI > 60
-        if price > vwap and rsi > 60:
-            # Stop Loss at 1.5x ATR below entry
-            sl = round(price - (1.5 * atr), 2)
-            # Target for 1:2 Risk-Reward
+        price = last['Close']
+        
+        # Strategy: Price > VWAP (Bullish) and RSI > 60 (Strength)
+        if price > last['VWAP'] and last['RSI'] > 60:
+            sl = round(price - (1.5 * last['ATR']), 2)
             target = round(price + (2 * (price - sl)), 2)
-            
             return {
-                "Ticker": symbol, "Price": price, "Signal": "🚀 BUY",
-                "Stop Loss": sl, "Target": target, "RSI": rsi, "Volume": int(last['Volume'])
+                "Ticker": symbol, "Price": round(price, 2), "RSI": round(last['RSI'], 1),
+                "StopLoss": sl, "Target": target, "Status": "🔥 STRONG BUY"
             }
-        return None
-    except:
-        return None
+    except: return None
 
-# 3. UI CONTROLS
-st.sidebar.header("Trading Budget")
-user_budget = st.sidebar.number_input("Total Capital (₹)", value=100000)
-risk_pct = st.sidebar.slider("Risk Per Trade (%)", 0.5, 2.0, 1.0) / 100
-
-if st.button("🔍 START LIVE SCAN"):
-    tickers = get_nifty50_tickers()
-    st.write(f"Scanning {len(tickers)} Stocks...")
-    
-    found_any = False
-    progress_bar = st.progress(0)
+# 3. UI DASHBOARD
+if st.button("🚀 SCAN ALL F&O STOCKS"):
+    fno_universe = get_all_fno_stocks()
+    st.info(f"Scanning {len(fno_universe)} F&O stocks in real-time...")
     
     results = []
-    for i, t in enumerate(tickers):
-        res = analyze_stock(t)
-        if res:
-            # Position Sizing
-            risk_amt = user_budget * risk_pct
-            qty = int(risk_amt // (res['Price'] - res['Stop Loss'])) if (res['Price'] - res['Stop Loss']) > 0 else 0
-            res['Quantity'] = qty
-            results.append(res)
-            found_any = True
-        progress_bar.progress((i + 1) / len(tickers))
-    
-    if found_any:
-        df_final = pd.DataFrame(results)
-        st.success("High Probability Setups Found!")
+    prog = st.progress(0)
+    for i, ticker in enumerate(fno_universe):
+        res = scan_logic(ticker)
+        if res: results.append(res)
+        prog.progress((i + 1) / len(fno_universe))
         
-        # Display as cards
-        for item in results:
-            with st.expander(f"🎯 {item['Ticker']} - {item['Signal']}"):
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Entry", f"₹{item['Price']}")
-                c2.metric("Target", f"₹{item['Target']}")
-                c3.metric("Stop Loss", f"₹{item['Stop Loss']}")
-                c4.metric("Buy Qty", item['Quantity'])
-        
-        st.table(df_final[['Ticker', 'Price', 'Signal', 'RSI', 'Quantity']])
+    if results:
+        res_df = pd.DataFrame(results)
+        st.success(f"Found {len(results)} high-momentum F&O setups!")
+        st.dataframe(res_df, use_container_width=True)
     else:
-        st.warning("No stocks currently match the VWAP + RSI criteria.")
+        st.warning("No F&O stocks currently meet the criteria. Try again shortly.")
